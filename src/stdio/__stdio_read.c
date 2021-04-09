@@ -21,3 +21,4 @@ size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
 	if (f->buf_size) buf[len-1] = *f->rpos++;
 	return len;
 }
+

@@ -1,6 +1,7 @@
 .text
 .global __clone
 .type   __clone,@function
+.extern __twix_syscall_target
 __clone:
 	xor %eax,%eax
 	mov $56,%al
@@ -13,7 +14,7 @@ __clone:
 	and $-16,%rsi
 	sub $8,%rsi
 	mov %rcx,(%rsi)
-	syscall
+	call __twix_syscall_target
 	test %eax,%eax
 	jnz 1f
 	xor %ebp,%ebp
@@ -22,6 +23,6 @@ __clone:
 	mov %eax,%edi
 	xor %eax,%eax
 	mov $60,%al
-	syscall
+	call __twix_syscall_target
 	hlt
 1:	ret

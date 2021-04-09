@@ -39,26 +39,28 @@ IMPH = $(addprefix $(srcdir)/, src/internal/stdio_impl.h src/internal/pthread_im
 
 LDFLAGS =
 LDFLAGS_AUTO =
-LIBCC = -lgcc
-CPPFLAGS =
+CPPFLAGS = -D _TWZ_MUSL_INTERNAL=1
 CFLAGS =
 CFLAGS_AUTO = -Os -pipe
 CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc 
 
 CFLAGS_ALL = $(CFLAGS_C99FSE)
-CFLAGS_ALL += -D_XOPEN_SOURCE=700 -I$(srcdir)/arch/$(ARCH) -I$(srcdir)/arch/generic -Iobj/src/internal -I$(srcdir)/src/internal -Iobj/include -I$(srcdir)/include
-CFLAGS_ALL += $(CPPFLAGS) $(CFLAGS_AUTO) $(CFLAGS)
+CFLAGS_ALL += -D_XOPEN_SOURCE=700 -I$(srcdir)/arch/$(ARCH) -I$(srcdir)/arch/generic -Iobj/src/internal -I$(srcdir)/src/internal -Iobj/include -I$(srcdir)/include -I../../include
 
-LDFLAGS_ALL = $(LDFLAGS_AUTO) $(LDFLAGS)
+CFLAGS_ALL += $(CPPFLAGS) $(CFLAGS_AUTO) $(CFLAGS) -fpic -fPIC
 
-AR      = $(CROSS_COMPILE)ar
-RANLIB  = $(CROSS_COMPILE)ranlib
+LDFLAGS_ALL = $(LDFLAGS_AUTO) $(LDFLAGS) #-Wl,--unresolved-symbols=ignore-all -Wl,--allow-shlib-undefined 
+
+#AR      = $(CROSS_COMPILE)ar
+AR      = ar
+RANLIB  = ranlib
+#RANLIB  = $(CROSS_COMPILE)ranlib
 INSTALL = $(srcdir)/tools/install.sh
 
 ARCH_INCLUDES = $(wildcard $(srcdir)/arch/$(ARCH)/bits/*.h)
 GENERIC_INCLUDES = $(wildcard $(srcdir)/arch/generic/bits/*.h)
 INCLUDES = $(wildcard $(srcdir)/include/*.h $(srcdir)/include/*/*.h)
-ALL_INCLUDES = $(sort $(INCLUDES:$(srcdir)/%=%) $(GENH:obj/%=%) $(ARCH_INCLUDES:$(srcdir)/arch/$(ARCH)/%=include/%) $(GENERIC_INCLUDES:$(srcdir)/arch/generic/%=include/%))
+ALL_INCLUDES = $(sort $(INCLUDES:$(srcdir)/%=%) $(GENH:obj/%=%) $(ARCH_INCLUDES:$(srcdir)/arch/$(ARCH)/%=include/%) $(GENERIC_INCLUDES:$(srcdir)/arch/generic/%=include/%)) 
 
 EMPTY_LIB_NAMES = m rt pthread crypt util xnet resolv dl
 EMPTY_LIBS = $(EMPTY_LIB_NAMES:%=lib/lib%.a)
@@ -72,9 +74,14 @@ ALL_TOOLS = obj/musl-gcc
 WRAPCC_GCC = gcc
 WRAPCC_CLANG = clang
 
-LDSO_PATHNAME = $(syslibdir)/ld-musl-$(ARCH)$(SUBARCH).so.1
+GCC_STD_HEADERS=$(shell $(CROSS_COMPILE)cpp -v /dev/null 2>&1 | grep include | grep '^ ' | tail -n1)
+
+#LDSO_PATHNAME = $(syslibdir)/ld-musl-$(ARCH)$(SUBARCH).so.1
+LDSO_PATHNAME = $(syslibdir)/ld64.so
 
 -include config.mak
+
+LIBCC = $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
 
 ifeq ($(ARCH),)
 
@@ -136,7 +143,7 @@ $(CRT_OBJS): CFLAGS_ALL += -DCRT
 
 $(LOBJS) $(LDSO_OBJS): CFLAGS_ALL += -fPIC
 
-CC_CMD = $(CC) $(CFLAGS_ALL) -c -o $@ $<
+CC_CMD = $(CC) $(CFLAGS_ALL) -MD -c -o $@ $<
 
 # Choose invocation of assembler to be used
 ifeq ($(ADD_CFI),yes)
@@ -146,31 +153,51 @@ else
 endif
 
 obj/%.o: $(srcdir)/%.s
-	$(AS_CMD)
+	@echo "[AS] $@"
+	@$(AS_CMD)
+
+#obj/src/stdio/__twzc_write.o: src/stdio/__twzc_write.c
+#	$(CC_CMD) -I $(GCC_STD_HEADERS) -std=gnu11 -I $(TWZKROOT)/us/include
+
+#obj/src/stdio/__twzc_write.lo: src/stdio/__twzc_write.c $(GENH) $(IMPH)
+#	$(CC_CMD) -I $(GCC_STD_HEADERS) -std=gnu11 -I $(TWZKROOT)/us/include
 
 obj/%.o: $(srcdir)/%.S
-	$(CC_CMD)
+	@echo "[AS] $@"
+	@$(CC_CMD)
 
 obj/%.o: $(srcdir)/%.c $(GENH) $(IMPH)
-	$(CC_CMD)
+	@echo "[CC] $@"
+	@$(CC_CMD)
 
 obj/%.lo: $(srcdir)/%.s
-	$(AS_CMD)
+	@echo "[AS] $@"
+	@$(AS_CMD)
 
 obj/%.lo: $(srcdir)/%.S
-	$(CC_CMD)
+	@echo "[CC] $@"
+	@$(CC_CMD)
 
 obj/%.lo: $(srcdir)/%.c $(GENH) $(IMPH)
-	$(CC_CMD)
+	@echo "[CC] $@"
+	@$(CC_CMD)
 
 lib/libc.so: $(LOBJS) $(LDSO_OBJS)
-	$(CC) $(CFLAGS_ALL) $(LDFLAGS_ALL) -nostdlib -shared \
-	-Wl,-e,_dlstart -o $@ $(LOBJS) $(LDSO_OBJS) $(LIBCC)
+	@echo "[LDSO] $@"
+	@$(CC) -Wno-unused-command-line-argument $(CFLAGS_ALL) $(LDFLAGS_ALL) -nostdlib -shared \
+		-Wl,-z,notext -Wl,-e,_dlstart -Wl,-z,max-page-size=0x1000 -o $@ $(LOBJS) $(LDSO_OBJS) -l:libtwix.a -l:libtwz.a $(LIBCC)
+
+lib/libc_updated.so: $(LOBJS) $(LDSO_OBJS) $(LIBTWIX_A) $(LIBTWZ_A)
+	@echo "[LDSO] $@"
+	@$(CC) -Wno-unused-command-line-argument $(CFLAGS_ALL) $(LDFLAGS_ALL) -nostdlib -shared \
+		-Wl,-z,notext -Wl,-e,_dlstart -Wl,-z,max-page-size=0x1000 -o $@ $(LOBJS) $(LDSO_OBJS) $(LIBTWIX_A) $(LIBTWZ_A) $(LIBCC)
 
 lib/libc.a: $(AOBJS)
 	rm -f $@
 	$(AR) rc $@ $(AOBJS)
 	$(RANLIB) $@
+
+-include $(AOBJS:.o=.d)
 
 $(EMPTY_LIBS):
 	rm -f $@
@@ -215,7 +242,7 @@ $(DESTDIR)$(includedir)/%: $(srcdir)/include/%
 	$(INSTALL) -D -m 644 $< $@
 
 $(DESTDIR)$(LDSO_PATHNAME): $(DESTDIR)$(libdir)/libc.so
-	$(INSTALL) -D -l $(libdir)/libc.so $@ || true
+	$(INSTALL) -D -l $(DESTDIR)$(libdir)/libc.so $@ || true
 
 install-libs: $(ALL_LIBS:lib/%=$(DESTDIR)$(libdir)/%) $(if $(SHARED_LIBS),$(DESTDIR)$(LDSO_PATHNAME),)
 

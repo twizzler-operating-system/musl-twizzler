@@ -298,6 +298,15 @@ static struct symdef find_sym(struct dso *dso, const char *s, int need_def)
 __attribute__((__visibility__("hidden")))
 ptrdiff_t __tlsdesc_static(), __tlsdesc_dynamic();
 
+static int is_twix_syscall(const char *name)
+{
+	const char *t = "__twix_syscall_target";
+	for(;*name;name++, t++)
+		if(*name != *t)
+			return 0;
+	return 1;
+}
+
 static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stride)
 {
 	unsigned char *base = dso->base;
@@ -322,6 +331,10 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 		skip_relative = 1;
 	}
 
+	Sym dummy;
+	struct dso dummy_dso;
+	dummy_dso.base = 0;
+	dummy.st_value = 0x123;
 	for (; rel_size; rel+=stride, rel_size-=stride*sizeof(size_t)) {
 		if (skip_relative && IS_RELATIVE(rel[1], dso->syms)) continue;
 		type = R_TYPE(rel[1]);
@@ -335,6 +348,10 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 			def = (sym->st_info&0xf) == STT_SECTION
 				? (struct symdef){ .dso = dso, .sym = sym }
 				: find_sym(ctx, name, type==REL_PLT);
+			if(!def.sym && type==REL_PLT && is_twix_syscall(name)) {
+				def.sym = &dummy;
+				def.dso = &dummy_dso;
+			}
 			if (!def.sym && (sym->st_shndx != SHN_UNDEF
 			    || sym->st_info>>4 != STB_WEAK)) {
 				error("Error relocating %s: %s: symbol not found",
@@ -554,20 +571,25 @@ static void *map_library(int fd, struct dso *dso)
 	ssize_t l = read(fd, buf, sizeof buf);
 	eh = buf;
 	if (l<0) return 0;
-	if (l<sizeof *eh || (eh->e_type != ET_DYN && eh->e_type != ET_EXEC))
+	if (l<sizeof *eh || (eh->e_type != ET_DYN && eh->e_type != ET_EXEC)) {
 		goto noexec;
+	}
 	phsize = eh->e_phentsize * eh->e_phnum;
 	if (phsize > sizeof buf - sizeof *eh) {
 		allocated_buf = malloc(phsize);
 		if (!allocated_buf) return 0;
 		l = pread(fd, allocated_buf, phsize, eh->e_phoff);
 		if (l < 0) goto error;
-		if (l != phsize) goto noexec;
+		if (l != phsize) {
+			goto noexec;
+		}
 		ph = ph0 = allocated_buf;
 	} else if (eh->e_phoff + phsize > l) {
 		l = pread(fd, buf+1, phsize, eh->e_phoff);
 		if (l < 0) goto error;
-		if (l != phsize) goto noexec;
+		if (l != phsize) {
+			goto noexec;
+		}
 		ph = ph0 = (void *)(buf + 1);
 	} else {
 		ph = ph0 = (void *)((char *)buf + eh->e_phoff);
@@ -1001,7 +1023,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 		return 0;
 	}
 	for (p=head->next; p; p=p->next) {
-		if (p->dev == st.st_dev && p->ino == st.st_ino) {
+		if (p->dev == st.st_dev && p->ino == st.st_ino) {// && 0 /* TODO (dbittman): Twizzler doesn't do inodes, so this check will always fail. */) {
 			/* If this library was previously loaded with a
 			 * pathname but a search found the same inode,
 			 * setup its shortname so it can be found by name. */
@@ -1057,6 +1079,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 			& (p->tls.align-1);
 		p->tls.offset = tls_offset;
 #endif
+
 		p->new_dtv = (void *)(-sizeof(size_t) &
 			(uintptr_t)(p->name+strlen(p->name)+sizeof(size_t)));
 		p->new_tls = (void *)(p->new_dtv + n_th*(tls_cnt+1));
@@ -1347,6 +1370,13 @@ void __dls2(unsigned char *base, size_t *sp)
 	Ehdr *ehdr = (void *)ldso.base;
 	ldso.name = ldso.shortname = "libc.so";
 	ldso.global = 1;
+#if 0
+	/* NOTE (dbittman): This is not in the original musl code; The libc ldso DSO struct does not get
+	 * a TLS ID, which (afaik) means libc cannot use thread-local storage itself. That may be by
+	 * design. However, Twizzler's Twix does use it, and is, at the moment, linked into libc.so
+	 * directly. We may need to revisit this later. */
+	ldso.tls_id = 1;
+#endif
 	ldso.phnum = ehdr->e_phnum;
 	ldso.phdr = laddr(&ldso, ehdr->e_phoff);
 	ldso.phentsize = ehdr->e_phentsize;
@@ -1417,6 +1447,11 @@ _Noreturn void __dls3(size_t *sp)
 	 * thread pointer at runtime. */
 	libc.tls_size = sizeof builtin_tls;
 	libc.tls_align = tls_align;
+	//uint64_t w;
+	//__asm__ volatile("lea 0(%%rip), %%rax" : "=a"(w) :: "memory");
+	//debug_printf("############# %p; w = %lx\n", (void *)builtin_tls, w);
+	//void *tp = __copy_tls((void *)builtin_tls);
+	//debug_printf("==========>>>>>> %p %p\n", tp);
 	if (__init_tp(__copy_tls((void *)builtin_tls)) < 0) {
 		a_crash();
 	}
@@ -1521,7 +1556,7 @@ _Noreturn void __dls3(size_t *sp)
 	}
 	if (app.tls.size) {
 		libc.tls_head = tls_tail = &app.tls;
-		app.tls_id = tls_cnt = 1;
+		app.tls_id = tls_cnt = 2;
 #ifdef TLS_ABOVE_TP
 		app.tls.offset = 0;
 		tls_offset = app.tls.size
@@ -1635,9 +1670,13 @@ _Noreturn void __dls3(size_t *sp)
 	debug.state = 0;
 	_dl_debug_state();
 
+	//debug_printf("DOING CRT JUMP: aux[AT_ENTRY] = %p\n", (void *)aux[AT_ENTRY]);
 	errno = 0;
 
-	CRTJMP((void *)aux[AT_ENTRY], argv-1);
+	/* NOTE (dbittman): Twizzler uses a slightly different calling convention for program entry
+	 * (vector pointer is rdi, not stack) */
+	((void (*)(void *))aux[AT_ENTRY])(argv-1);
+	//CRTJMP((void *)aux[AT_ENTRY], argv-1);
 	for(;;);
 }
 
@@ -1918,7 +1957,7 @@ int dl_iterate_phdr(int(*callback)(struct dl_phdr_info *info, size_t size, void 
 
 __attribute__((__visibility__("hidden")))
 void __dl_vseterr(const char *, va_list);
-
+#if 0
 static void error(const char *fmt, ...)
 {
 	va_list ap;
@@ -1933,3 +1972,274 @@ static void error(const char *fmt, ...)
 	__dl_vseterr(fmt, ap);
 	va_end(ap);
 }
+#else
+
+
+#include <stdarg.h>
+
+#include <errno.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+static const char *DIGITS_lower = "0123456789abcdef";
+static const char *DIGITS_upper = "0123456789ABCDEF";
+#define WN_LOWER 1
+#define WN_NONEG 2
+#define WN_LJUST 4
+static char *write_number(char *buffer,
+  long long value,
+  int base,
+  int options,
+  int min_width,
+  int precision)
+{
+	char digits[256];
+	memset(digits, 0, 256);
+	bool negative = false;
+	unsigned long long tmp;
+	if(value < 0 && !(options & WN_NONEG)) {
+		negative = true;
+		tmp = -value;
+	} else {
+		tmp = value;
+	}
+
+	int len = 0;
+	while(tmp) {
+		digits[len] = tmp % base;
+		tmp /= base;
+		len++;
+	}
+
+	if(!len)
+		len = 1;
+
+	if(negative)
+		*buffer++ = '-';
+	if(!(options & WN_LJUST)) {
+		for(int i = 0; i + ((len > precision) ? len : precision) < min_width; i++)
+			*buffer++ = ' ';
+	}
+	if(base == 16) {
+		*buffer++ = '0';
+		*buffer++ = 'x';
+	} else if(base == 2) {
+		*buffer++ = '0';
+		*buffer++ = 'b';
+	}
+
+	for(int i = len; i < precision; i++)
+		*buffer++ = '0';
+
+	for(int i = len - 1; i >= 0; i--) {
+		if(options & WN_LOWER)
+			*buffer++ = DIGITS_lower[(int)digits[i]];
+		else
+			*buffer++ = DIGITS_upper[(int)digits[i]];
+	}
+
+	if(options & WN_LJUST) {
+		for(int i = 0; i + ((len > precision ? len : precision)) < min_width; i++)
+			*buffer++ = ' ';
+	}
+
+	return buffer;
+}
+
+#define GETVAL(value, sign)                                                                        \
+	do {                                                                                           \
+		if(l == 0)                                                                                 \
+			value = va_arg(args, sign int);                                                        \
+		else if(l == 1)                                                                            \
+			value = va_arg(args, sign long);                                                       \
+		else                                                                                       \
+			value = va_arg(args, sign long long);                                                  \
+	} while(false)
+
+#define isnum(n) (n >= '0' && n <= '9')
+static int parse_number(const char **str)
+{
+	const char *tmp = *str;
+	int num = 0;
+	while(isnum(*tmp)) {
+		num = num * 10 + *tmp - '0';
+		tmp++;
+	}
+	*str = tmp;
+	return num;
+}
+
+static void vbufprintk(char *buffer, const char *fmt, va_list args)
+{
+	const char *s = fmt;
+	char *b = buffer;
+	while(*s) {
+		if(*s == '%') {
+			s++;
+			int flags = 0;
+			if(*s == '-') {
+				s++;
+				flags |= WN_LJUST;
+			}
+			/* next up, look for min field width */
+			unsigned int min_field_width = parse_number(&s);
+			if(*s == '*') {
+				s++;
+				min_field_width = va_arg(args, int);
+			}
+			unsigned int precision = 0;
+			if(*s == '.') {
+				s++;
+				precision = parse_number(&s);
+			}
+			char type = *s;
+			int l = 0;
+			if(type == 'l') {
+				type = *(++s);
+				l++;
+			}
+			/* do it a second time... */
+			if(type == 'l') {
+				type = *(++s);
+				l++;
+			}
+
+			switch(type) {
+				char *str;
+				long long value;
+				unsigned long long uvalue;
+				unsigned int count;
+				size_t len;
+				case 0:
+					goto done;
+				case 'd':
+				case 'i':
+					GETVAL(value, signed);
+					b = write_number(b, value, 10, flags, min_field_width, precision);
+					break;
+				case 'u':
+					GETVAL(uvalue, unsigned);
+					b = write_number(b, uvalue, 10, flags | WN_NONEG, min_field_width, precision);
+					break;
+				case 'o':
+					GETVAL(uvalue, unsigned);
+					b = write_number(b, uvalue, 8, flags | WN_NONEG, min_field_width, precision);
+					break;
+				case 'c':
+					*b++ = (unsigned char)va_arg(args, int);
+					break;
+				case 'x':
+					GETVAL(uvalue, unsigned);
+					b = write_number(b, uvalue, 16, flags | WN_NONEG, min_field_width, precision);
+					break;
+				case 'b':
+					GETVAL(uvalue, unsigned);
+					b = write_number(b, uvalue, 2, flags | WN_NONEG, min_field_width, precision);
+					break;
+				case 'p':
+					uvalue = (unsigned long long)va_arg(args, void *);
+					b = write_number(b, uvalue, 16, flags | WN_NONEG, min_field_width, precision);
+					break;
+				case 'm': {
+					char *e = strerror(errno);
+					strcpy(b, e);
+					b += strlen(e);
+				} break;
+				case 's':
+					str = va_arg(args, char *);
+					if(!str)
+						str = (char *)"(null)";
+					len = strlen(str);
+					if(precision && precision < len)
+						len = precision;
+					if(!(flags & WN_LJUST)) {
+						for(int i = 0; len + i < min_field_width; i++)
+							*b++ = ' ';
+					}
+					count = 0;
+					while(*str && count++ < len)
+						*b++ = *str++;
+					if(flags & WN_LJUST) {
+						for(int i = 0; len + i < min_field_width; i++)
+							*b++ = ' ';
+					}
+					break;
+				case '%':
+					*b++ = '%';
+			}
+		} else {
+			*b++ = *s;
+		}
+		s++;
+	}
+done:
+	*b = 0;
+}
+
+static inline long __twz__syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6)
+{
+	unsigned long ret;
+	register long r8 __asm__("r8") = a4;
+	register long r9 __asm__("r9") = a5;
+	register long r10 __asm__("r10") = a6;
+	__asm__ __volatile__("syscall;"
+	                     : "=a"(ret)
+	                     : "a"(n), "D"(a1), "S"(a2), "d"(a3), "r"(r8), "r"(r9), "r"(r10)
+	                     : "r11", "rcx", "memory");
+	return ret;
+}
+
+#define SYS_DEBUG_PRINT 2
+static inline long __debug_print(const char *str, size_t len)
+{
+	return __twz__syscall6(SYS_DEBUG_PRINT, (long)str, len, 0, 0, 0, 0);
+}
+
+__attribute__((used)) static int debug_printf(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	char buf[1024];
+	for(int i = 0; i < 1024; i++)
+		buf[i] = 0;
+	vbufprintk(buf, fmt, args);
+	__debug_print(buf, strlen(buf));
+	va_end(args);
+	return 0;
+}
+
+__attribute__((used)) static int debug_vprintf(const char *fmt, va_list args)
+{
+	char buf[1024];
+	for(int i = 0; i < 1024; i++)
+		buf[i] = 0;
+	vbufprintk(buf, fmt, args);
+	__debug_print(buf, strlen(buf));
+	return 0;
+}
+
+static void error(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	debug_vprintf(fmt, ap);
+	debug_printf("\n");
+	if(!runtime) {
+		ldso_fail = 1;
+	}
+#if 0
+	if (!runtime) {
+		vdprintf(2, fmt, ap);
+		dprintf(2, "\n");
+		ldso_fail = 1;
+		va_end(ap);
+		return;
+	}
+#endif
+	__dl_vseterr(fmt, ap);
+	va_end(ap);
+}
+
+#endif
