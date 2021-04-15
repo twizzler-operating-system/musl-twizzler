@@ -22,6 +22,7 @@
 #include "dynlink.h"
 
 static void error(const char *, ...);
+__attribute__((used)) static int debug_printf(const char *fmt, ...);
 
 #define MAXP2(a,b) (-(-(a)&-(b)))
 #define ALIGN(x,y) ((x)+(y)-1 & -(y))
@@ -1936,6 +1937,8 @@ int dl_iterate_phdr(int(*callback)(struct dl_phdr_info *info, size_t size, void 
 	int ret = 0;
 	for(current = head; current;) {
 		info.dlpi_addr      = (uintptr_t)current->base;
+		if(current == head)
+		info.dlpi_name      = current->name;
 		info.dlpi_name      = current->name;
 		info.dlpi_phdr      = current->phdr;
 		info.dlpi_phnum     = current->phnum;
